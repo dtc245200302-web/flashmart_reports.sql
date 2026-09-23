@@ -1,0 +1,70 @@
+CREATE INDEX idx_type_date 
+ON Transactions(transaction_type, created_at);
+-- ✅ TRUY VẤN ĐÃ TỐI ƯU (SARGable)
+SELECT SUM(amount) AS total_deposit
+FROM Transactions
+WHERE transaction_type = 'DEPOSIT' 
+  AND created_at >= '2026-06-01 00:00:00' 
+  AND created_at <  '2026-07-01 00:00:00';
+  -- ========================================================
+-- PAYFLOW OPTIMIZED - FIX NON-SARGABLE QUERY
+-- ========================================================
+USE payflow_db;
+
+-- Bước 1: Tạo Composite Index
+CREATE INDEX idx_type_date 
+ON Transactions(transaction_type, created_at);
+
+-- Bước 2: Xem Execution Plan câu cũ (lỗi)
+EXPLAIN 
+SELECT SUM(amount) AS total_deposit
+FROM Transactions
+WHERE transaction_type = 'DEPOSIT' 
+  AND YEAR(created_at) = 2026 
+  AND MONTH(created_at) = 6;
+-- Kỳ vọng: type = ALL, rows ~ 5,000,000
+
+-- Bước 3: Xem Execution Plan câu mới (đã tối ưu)
+EXPLAIN 
+SELECT SUM(amount) AS total_deposit
+FROM Transactions
+WHERE transaction_type = 'DEPOSIT' 
+  AND created_at >= '2026-06-01 00:00:00' 
+  AND created_at <  '2026-07-01 00:00:00';
+-- Kỳ vọng: type = range, key = idx_type_date, rows giảm mạnh
+
+-- Bước 4: Chạy truy vấn tối ưu
+SELECT SUM(amount) AS total_deposit
+FROM Transactions
+WHERE transaction_type = 'DEPOSIT' 
+  AND created_at >= '2026-06-01 00:00:00' 
+  AND created_at <  '2026-07-01 00:00:00';
+  # Nhật ký hỏi đáp AI
+
+## Prompt 1: Non-SARGable
+**Hỏi:** Tại sao WHERE YEAR(col) = 2026 không dùng được Index?
+**Đáp:** Vì hàm bọc quanh cột buộc MySQL tính toán trên từng dòng,
+không thể dùng B-Tree Index → Full Table Scan.
+
+## Prompt 2: Thứ tự Composite Index
+**Hỏi:** Composite Index (transaction_type, created_at) — cột nào trước?
+**Đáp:** Cột có selectivity cao đứng trước (transaction_type) để lọc
+nhanh; cột range đứng sau (created_at) để tận dụng B-Tree.
+
+## Prompt 3: type trong EXPLAIN
+**Hỏi:** Các giá trị type: ALL, index, range, ref, const khác gì?
+**Đáp:** 
+- ALL: Full scan (chậm nhất)
+- index: Full index scan
+- range: Quét theo khoảng (dùng Index)
+- ref: Tra cứu theo giá trị (dùng Index)
+- const: Tra cứu 1 dòng (nhanh nhất)
+
+## Prompt 4: Execution Time
+**Hỏi:** Làm sao đo thời gian thực thi câu SQL?
+**Đáp:** SET profiling = 1; chạy query; SHOW PROFILES;
+
+## Prompt 5: Index Seek vs Index Scan
+**Hỏi:** Index Seek và Index Scan khác nhau thế nào?
+**Đáp:** Seek = tìm chính xác (B-Tree đi thẳng) — nhanh.
+Scan = quét toàn bộ Index — chậm hơn Seek nhưng nhanh hơn Full Table Scan.
