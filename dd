@@ -1,0 +1,158 @@
+Truy vấn lỗi (Non-SARGable)
+sql
+-- ❌ LỖI: Bọc hàm YEAR() và MONTH() quanh cột
+SELECT SUM(amount) AS total_deposit
+FROM Transactions
+WHERE transaction_type = 'DEPOSIT' 
+  AND YEAR(created_at) = 2026 
+  AND MONTH(created_at) = 6;
+Vấn đề:
+
+Hàm YEAR() và MONTH() bọc quanh created_at → MySQL không dùng được Index
+
+Phải tính toán hàm cho từng dòng → Full Table Scan 5 triệu dòng
+
+Kết quả EXPLAIN: type = ALL, rows ~ 5,000,000
+
+PHẦN 2: CHIẾN LƯỢC TỐI ƯU
+2.1. Tạo Composite Index
+sql
+CREATE INDEX idx_type_date 
+ON Transactions(transaction_type, created_at);
+Thứ tự cột: transaction_type trước (selectivity cao), created_at sau (range).
+
+2.2. Viết lại truy vấn (SARGable)
+sql
+-- ✅ ĐÃ TỐI ƯU: Dùng khoảng thời gian thay vì hàm
+SELECT SUM(amount) AS total_deposit
+FROM Transactions
+WHERE transaction_type = 'DEPOSIT' 
+  AND created_at >= '2026-06-01 00:00:00' 
+  AND created_at <  '2026-07-01 00:00:00';
+ PHẦN 3: FILE payflow_optimized.sql
+sql
+-- ========================================================
+-- PAYFLOW OPTIMIZED - FIX NON-SARGABLE QUERY
+-- ========================================================
+USE payflow_db;
+
+-- 1. Tạo Composite Index
+CREATE INDEX idx_type_date 
+ON Transactions(transaction_type, created_at);
+
+-- 2. EXPLAIN câu CŨ (lỗi)
+EXPLAIN 
+SELECT SUM(amount) AS total_deposit
+FROM Transactions
+WHERE transaction_type = 'DEPOSIT' 
+  AND YEAR(created_at) = 2026 
+  AND MONTH(created_at) = 6;
+-- Kỳ vọng: type = ALL, rows ~ 5,000,000
+
+-- 3. EXPLAIN câu MỚI (tối ưu)
+EXPLAIN 
+SELECT SUM(amount) AS total_deposit
+FROM Transactions
+WHERE transaction_type = 'DEPOSIT' 
+  AND created_at >= '2026-06-01 00:00:00' 
+  AND created_at <  '2026-07-01 00:00:00';
+-- Kỳ vọng: type = range, key = idx_type_date, rows giảm mạnh
+
+-- 4. Chạy truy vấn tối ưu
+SELECT SUM(amount) AS total_deposit
+FROM Transactions
+WHERE transaction_type = 'DEPOSIT' 
+  AND created_at >= '2026-06-01 00:00:00' 
+  AND created_at <  '2026-07-01 00:00:00';
+ PHẦN 4: SO SÁNH EXPLAIN
+Chỉ số	Trước tối ưu	Sau tối ưu
+type	ALL ❌	range ✅
+possible_keys	NULL	idx_type_date
+key	NULL	idx_type_date ✅
+rows	~5,000,000	~vài nghìn
+Extra	Using where	Using index condition
+PHẦN 5: FILE explain_analysis.md
+markdown
+# Phân tích EXPLAIN: Trước và Sau tối ưu
+
+## Trước tối ưu (Non-SARGable)
+- **type = ALL**: Quét toàn bộ 5 triệu dòng.
+- **key = NULL**: Không dùng được Index.
+- **rows ~ 5,000,000**: Phải tính YEAR/MONTH từng dòng → CPU 100%.
+- **Hệ quả**: 45 giây, khóa bảng, timeout.
+
+## Sau tối ưu (SARGable + Composite Index)
+- **type = range**: Dùng B-Tree Index tìm khoảng thời gian.
+- **key = idx_type_date**: Index được chọn đúng.
+- **rows giảm mạnh**: Chỉ quét vài nghìn dòng.
+- **Extra = Using index condition**: Lọc trên Index trước khi đọc bảng.
+
+## Nguyên nhân cốt lõi
+Bọc hàm YEAR()/MONTH() quanh cột created_at khiến MySQL không thể
+dùng Index. Chuyển sang so sánh khoảng (>= và <) giúp truy vấn
+trở nên SARGable → Index hoạt động → giảm từ 45s xuống <1s.
+🤖 PHẦN 6: FILE ai_prompt_log.md
+markdown
+# Nhật ký hỏi đáp AI
+
+## Prompt 1: Non-SARGable
+**Hỏi:** Tại sao WHERE YEAR(col) = 2026 không dùng được Index?
+**Đáp:** Hàm bọc quanh cột buộc MySQL tính toán từng dòng → 
+không dùng được B-Tree Index → Full Table Scan.
+
+## Prompt 2: Thứ tự Composite Index
+**Hỏi:** Composite Index (transaction_type, created_at) — cột nào trước?
+**Đáp:** Cột selectivity cao đứng trước (transaction_type), cột range 
+đứng sau (created_at) để tận dụng B-Tree.
+
+## Prompt 3: type trong EXPLAIN
+**Hỏi:** Các giá trị type: ALL, index, range, ref, const?
+**Đáp:** 
+- ALL: Full scan (chậm nhất)
+- range: Quét theo khoảng (dùng Index)
+- ref: Tra cứu theo giá trị (=)
+- const: Tra cứu 1 dòng (nhanh nhất)
+
+## Prompt 4: Execution Time
+**Hỏi:** Cách đo thời gian thực thi SQL?
+**Đáp:** SET profiling = 1; chạy query; SHOW PROFILES;
+
+## Prompt 5: Index Seek vs Index Scan
+**Hỏi:** Index Seek và Index Scan khác nhau?
+**Đáp:** Seek = tìm chính xác (nhanh hơn). Scan = quét toàn Index.
+🎤 PHẦN 7: CÂU HỎI VẤN ĐÁP (CHUẨN BỊ)
+Q1: Thứ tự thực thi các mệnh đề SQL?
+→ FROM → JOIN → WHERE → GROUP BY → HAVING → SELECT → ORDER BY → LIMIT
+→ WHERE chạy trước SELECT vì phải lọc dữ liệu trước khi tính toán.
+
+Q2: Khi nào Full Table Scan nhanh hơn Index Scan?
+→ Khi cần lấy > 20-30% số dòng của bảng nhỏ. Đọc tuần tự nhanh hơn nhảy qua Index rồi quay lại bảng.
+
+Q3: Nhiều Index gây rủi ro gì?
+→ Mỗi INSERT/UPDATE/DELETE phải cập nhật tất cả Index → chậm ghi, tốn dung lượng, khóa tài nguyên.
+
+PHẦN 8: KIẾN THỨC CỐT LÕI
+Khái niệm	Giải thích
+SARGable	Điều kiện WHERE dùng được Index
+Non-SARGable	Bọc hàm quanh cột → mất Index
+Composite Index	Index trên nhiều cột — thứ tự rất quan trọng
+type = ALL	Full Table Scan (xấu nhất)
+type = range	Quét theo khoảng (dùng Index) — tốt
+type = ref	Tra cứu theo giá trị (=) — rất tốt
+type = const	Tra cứu 1 dòng — tốt nhất
+📦 PHẦN 9: ĐÓNG GÓI NỘP BÀI
+text
+payflow_submission.zip
+├── payflow_optimized.sql      # Index + truy vấn tối ưu
+├── explain_analysis.md        # Phân tích EXPLAIN
+└── ai_prompt_log.md           # Nhật ký hỏi AI
+✅ PHẦN 10: CHECKLIST TRƯỚC KHI NỘP
+□ Đã tạo idx_type_date trên (transaction_type, created_at)
+□ Đã loại bỏ YEAR() và MONTH() khỏi WHERE
+□ Đã dùng >= và < cho khoảng thời gian
+□ EXPLAIN mới có type = range (không còn ALL)
+□ key = idx_type_date xuất hiện trong EXPLAIN
+□ Đã viết explain_analysis.md
+□ Đã viết ai_prompt_log.md
+□ Đã nén thành file .zip
+
